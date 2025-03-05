@@ -1,0 +1,304 @@
+---
+title: "PREDICTION REPORT"
+author: "Luke Stucky"
+date: "12/11/2024"
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 4
+    fig_width: 5
+    fig_height: 3
+    fig_caption: yes
+    number_sections: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+    warnings: false
+    messages: false
+    echo: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE) 
+options(scipen=999)
+suppressWarnings(RNGversion("3.5.3"))
+
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(forecast)
+library(MASS)
+library(DataExplorer)
+library(ggplot2)
+library(formattable)
+library(knitr)
+library(dlookr)
+library(corrplot)
+library(summarytools)
+library(dplyr)
+library(janitor)
+library(readxl)
+```
+
+```{r,  include=FALSE}
+mydata <- read.csv("credit_score.csv")
+mydata <- clean_names(mydata)
+head(mydata,10)
+```
+
+```{r}
+mydata <- mydata %>%
+  dplyr::select(
+    default,
+    income,
+    savings,
+    debt,
+    r_savings_income,
+    r_debt_income,
+    r_clothing_income,
+    r_education_income,
+    r_entertainment_income,
+    r_fines_income,
+    r_gambling_income,
+    r_groceries_income,
+    r_health_income,
+    r_housing_income,
+    r_tax_income,
+    r_travel_income,
+    r_utilities_income,
+    r_expenditure_income,
+    cat_gambling,
+    cat_debt,
+    cat_credit_card,
+    cat_mortgage,
+    cat_savings_account,
+    cat_dependents,
+    credit_score
+  )
+```
+
+------------------------------------------------------------------------
+
+# BUSINESS UNDERSTANDING
+
+Following the classification model aimed at reducing credit defaults, the financial institution is now focused on predicting credit scores more accurately to enhance their decision-making process. The classification model helped the institution identify high-risk customers, but predicting credit scores will allow the institution to fine-tune its offerings based on a customer’s exact creditworthiness. Accurate credit score predictions can allow the institution to offer personalized financial products, better interest rates, and improve overall customer satisfaction.
+
+As the head data analyst, Luke Stucky now seeks to improve the institution's ability to predict customers' credit scores based on their financial behaviors. This predictive model will provide an understanding of the financial health of applicants, allowing for more informed lending decisions and more targeted risk management strategies.
+
+By enhancing the current credit score models, Luke Stucky aims to answer the following key research questions:
+
+How can financial behaviors such as income, savings, and debt predict an individual’s credit score more accurately?
+
+Which factors have the greatest impact on predicting credit scores, and how can we leverage these insights for better decision-making?
+
+This predictive model will provide a deeper understanding of customers’ financial profiles, allowing the institution to better tailor its lending and financial products, ensure more responsible lending, and ultimately increase profitability while reducing risk.\
+
+------------------------------------------------------------------------
+
+# DATA UNDERSTANDING
+
+### EDA Inspect dataset for Missing Values and Outliers
+
+```{r,  include=TRUE}
+
+library(DataExplorer)
+plot_intro(mydata)
+
+table4 <- dlookr::diagnose_outlier(mydata) 
+knitr::kable(table4, align = "c")  
+```
+
+We do not have any missing values in this data. Outliers are important to keep in this data as they can be indicaters of a customer's credit score.\
+
+---
+
+### Check default proportion for balance
+
+```{r}
+psych::describe(mydata, fast = TRUE)
+```
+
+### Check summary statistics and variable distributions
+
+```{r}
+mydata%>% plot_histogram()
+mydata %>% plot_boxplot(by = "credit_score")
+```
+
+# DATA PREPARATION
+
+### Address outliers and missing values
+
+```{r, include=TRUE}
+
+```
+
+It is important to keep outliers in the data and there are no missing values.\
+
+### Partition the dataset
+
+```{r, include=TRUE}
+set.seed(1)
+myIndex <- createDataPartition(mydata$credit_score, p=0.7, list=FALSE)
+trainSet <- mydata[myIndex,]
+validationSet <- mydata[-myIndex,]
+```
+
+# MODEL DEVELOPMENT
+
+### Model 1: Simple Regression
+
+```{R, include=TRUE}
+model1 <- lm(credit_score ~  ., data = trainSet)
+
+summary(model1)
+```
+
+The simple regression model performs well with an adjusted r-squared value of 0.7844. It has several statistically significant predictors at the .001 level. A key predictor to note is the r_debt_income.
+
+### Model 2: Model with Interactions
+
+```{r}
+#Step wise regression
+model2 <- step(model1, 
+                   scope = list(lower = model1, 
+                                upper = ~ .^2),
+                   direction = "both", 
+                   trace = 0)
+
+summary(model2)
+```
+
+Using a step wise regression, automatic interactions were discovered and used in the model. This took our model's adjusted r2 from 0.7844 to 0.8521. This now means that more variability can be seen in the model.
+
+------------------------------------------------------------------------
+
+### Model 3: Regression Tree
+
+#### Generate the Default Tree
+
+```{r,  include=TRUE}
+set.seed(1)
+default_tree <- rpart(credit_score ~ ., data = trainSet, method = "anova")
+#summary(default_tree)
+cat("DEFAULT TREE\n")
+prp(default_tree, type = 1, extra = 1, under = TRUE)
+```
+
+The default tree splits 6 times and has 7 nodes. The tree splits based on the ratio of debt to income six times and the the ratio of gambling to income once.\
+
+#### Find the Optimal Tree
+
+```{r,  include=TRUE}
+set.seed(1)
+full_tree <- rpart(credit_score ~ ., data = trainSet, method = "anova", cp=0, minsplit=2, minbucket=1)
+```
+
+```{r,  include=FALSE}
+pip <- printcp(full_tree)
+```
+
+```{r,  include=TRUE}
+cat("FULL TREE - Identify the complexity parameter (cp) associated with the smallest cross-validated prediction error\n")
+head(pip,10)
+```
+
+The cross-validation error reaches its lowest point at `r min(pip[, "xerror"])`, or `r pip[which.min(pip[, "xerror"]), "nsplit"]` splits. A tree with `r pip[which.min(pip[, "xerror"]), "nsplit"]` splits is likely optimal, as it achieves the lowest xerror with minimal complexity.\
+
+### Optimal cp
+
+```{r}
+xerror <- full_tree$cptable[, "xerror"]
+xstd <- full_tree$cptable[, "xstd"]
+
+min_xerror_index <- which.min(xerror)
+min_error_cp <- round(full_tree$cptable[min_xerror_index, "CP"] + 0.000001, 6)
+
+best_pruned_threshold <- xerror[min_xerror_index] + xstd[min_xerror_index]
+
+best_pruned_index <- which(xerror <= best_pruned_threshold)[1]
+best_pruned_cp <- round(full_tree$cptable[best_pruned_index, "CP"] + 0.000001, 6)
+
+min_error_cp
+best_pruned_cp
+```
+
+We were able to calculate the optimal cp for a tree using the min error method and the best pruned method. In our case, we ended up using the min error cp after further investigation.
+
+#### Create the Optimal Tree
+
+```{r,  include=TRUE}
+pruned_tree <- prune(full_tree, cp = min_error_cp)
+
+cat("OPTIMAL TREE\n")
+prp(pruned_tree, type = 1, extra = 1, under = TRUE)
+```
+
+The optimal tree splits solely on the ratio of debt to income. This tree is organized and does its job well.\
+
+------------------------------------------------------------------------
+
+# MODEL EVALUATION
+
+#### Model 1: Simple Regression
+
+```{r,  include=TRUE}
+predict1 <- predict(model1, newdata=validationSet)
+performance1 <- data.frame(forecast::accuracy(predict1, validationSet$credit_score))
+RMSE1 <- formattable::digits(performance1$RMSE, digits=2)
+MAPE1 <- formattable::percent(performance1$MAPE, digits = 2)/100
+RMSE1; MAPE1
+```
+
+After looking at the statistics of the simple regression model, I thought it would be worth it to check the RMSE and the MAPE of it as it already had excellent scores. This gave us a decent RMSE of `r RMSE1` and an excellent MAPE of `r MAPE1`. 
+
+#### Model 2: Regression with Interaction
+
+```{r,  include=TRUE}
+predict2 <- predict(model2, newdata=validationSet)
+performance2 <- data.frame(forecast::accuracy(predict2, validationSet$credit_score))
+RMSE2 <- formattable::digits(performance2$RMSE, digits=2)
+MAPE2 <- formattable::percent(performance2$MAPE, digits = 2)/100
+RMSE2; MAPE2
+```
+
+The stepwise regression model improved the adjusted r2 significantly. However, after evaluating the RMSE and the MAPE, it is the inferior model compared to the simple regression.
+
+#### Model 3: Regression Tree -- RMSE & MAPE
+
+```{r,  include=TRUE}
+predict3 <- predict(pruned_tree, validationSet)
+performance3 <- data.frame(forecast::accuracy(predict3, validationSet$credit_score))
+RMSE3 <- formattable::digits(performance3$RMSE, digits=2)
+MAPE3 <- formattable::percent(performance3$MAPE, digits = 2)/100
+RMSE3; MAPE3
+```
+
+The regression tree turned out well, but still not as good as the simple regression. Both the RMSE and the MAPE were close to the other two models, but they were still worse.\
+------------------------------------------------------------------------
+
+# DEPLOYMENT
+
+Going back to the questions from the beginning, we can use model 1 to answer each question.\
+How can financial behaviors such as income, savings, and debt predict an individual’s credit score more accurately?
+  Income and debt were both statistically significant, but they were not the most important variables in predicting the credit    score. Interestingly, the ratio between the two of them is actually the biggest predictor.
+Which factors have the greatest impact on predicting credit scores, and how can we leverage these insights for better decision-making?
+  Just like was previously mentioned, the ratio between debt and income has the greatest impact on predicting credit scores.      This can be seen in the first model (which is the one we will implement), and also in the other two models. 
+After completing the three, we found that the first model, doing the regression model without interactions, gave us the smallest RMSE and MAPE on the validation set of data. The MAPE is very encouraging at `r MAPE1`, however, the RMSE does raise some concerns at `r RMSE1`. Credit score should not vary that heavily, so that is something that will need to be looked at closer before implementing the model. We are on the right track for better predicting a customers credit score, and once more fine tuned, this will lead to better insights into key factors that drive a person to default in the classification model.\
+
+# REFERENCES
+
+## R and Packages
+
+```{r}
+cat(as.character(R.version.string),"\n")
+
+cat("\nR Packages Used:\n")
+names(sessionInfo()$otherPkgs)
+```
+
+## Other References
+
+Jaggia, S., Kelly, A., Lertwachara, K., & Chen, L. (2023). *Business analytics: Communicating with numbers* (2nd Ed.). McGraw-Hill.
+
+

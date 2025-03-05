@@ -1,0 +1,589 @@
+---
+title: "Classification_Report"
+author: "LUKE STUCKY"
+date: "December 11, 2024"
+format:
+  html: 
+    code-fold: false
+    code-overflow: wrap
+execute:
+  warning: false
+  messages: false
+  echo: false
+  include: true
+toc: true
+editor: source
+---
+
+```{r}
+options(scipen=999)
+suppressWarnings(RNGversion("3.5.3"))
+```
+
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(flextable)
+library(gridExtra)
+library(caret)
+library(gains)
+library(pROC)
+library(klaR)
+library(rpart)
+library(rpart.plot)
+library(dplyr)
+```
+
+# BUSINESS UNDERSTANDING
+
+A high-end financial institution is working on reducing credit default rates while identifying high-risk customers. This will allow the institution to improve profitability and minimize financial losses. As the head data analyst, Luke Stucky is working on developing a reliable classification system that can predict whether a customer will default on their credit obligations. Doing this will allow the institution to be more effective in their selection of customers and increase their reputation as a high-end financial institution. To do this, Luke Stucky will create two models, a KNN and a Logistic Regression model to help answer the two questions: 
+
+What are the key predictors of credit default among customers, based on their financial and spending behaviors?
+How can the institution improve the accuracy of default prediction models to effectively mitigate financial risks while minimizing false negatives?
+
+After answering these questions, Luke is hoping to implement one of the models starting the new year.
+
+
+# DATA UNDERSTANDING
+
+```{r}
+mydata <- read.csv("credit_score.csv") %>% 
+	mutate(across(where(is.character), as.factor))
+
+library(janitor)
+mydata <- clean_names(mydata)
+```
+
+## Remove variables
+
+```{r}
+mydata <- mydata %>%
+  dplyr::select(
+    default,
+    income,
+    savings,
+    debt,
+    r_savings_income,
+    r_debt_income,
+    r_clothing_income,
+    r_education_income,
+    r_entertainment_income,
+    r_fines_income,
+    r_gambling_income,
+    r_groceries_income,
+    r_health_income,
+    r_housing_income,
+    r_tax_income,
+    r_travel_income,
+    r_utilities_income,
+    r_expenditure_income,
+    cat_gambling,
+    cat_debt,
+    cat_credit_card,
+    cat_mortgage,
+    cat_savings_account,
+    cat_dependents,
+    credit_score
+  )
+```
+
+## Create the dependent variable
+
+```{r}
+library(summarytools)
+
+mydata$default <- as.factor(mydata$default)
+
+ctable(as.factor(mydata$default), mydata$default)
+
+```
+
+## EDA
+
+### Check for missing values, variable formats, and data load errors.
+
+```{r}
+mydata %>% head(3)			
+mydata %>% tail(3)			
+mydata %>% plot_intro()	
+```
+
+### Check default proportion for balance
+
+```{r}
+psych::describe(mydata, fast = TRUE)
+```
+
+### Check summary statistics and variable distributions
+
+```{r}
+mydata$default <- as.factor(mydata$default)
+mydata%>% plot_histogram()
+mydata %>% plot_boxplot(by = "default")
+```
+
+### Check for outliers
+
+```{r}
+library(dlookr)
+dlookr::diagnose_outlier(mydata)
+```
+
+It is important to not mess with any of the outliers in this dataset. Outliers can be used as a clear example of whether or not the person defaults.\
+
+# DATA PREPARATION
+
+```{r}
+
+```
+
+Because there are no missing values and the outliers do not need fixed, we can move past data preparation.\
+
+# MODELING AND EVALUATION
+
+## MODEL 1: KNN
+
+### Prepare Data
+
+```{r}
+mydata_scaled <- mydata %>%
+  dplyr::select(default,where(is.numeric)) %>%  
+  dplyr::mutate(across(where(is.numeric), scale))
+```
+
+### Partition
+
+#### Partition 60/40 and check proportions
+
+```{r}
+set.seed(1)
+myIndex<- createDataPartition(mydata_scaled$default, p=0.6, list=FALSE)
+trainSet_scaled <- mydata_scaled[myIndex,]
+testSet_scaled  <- mydata_scaled[-myIndex,]
+
+# check proportions are relevant
+cat("Full Dataset");    prop.table(table(mydata_scaled$default))
+cat("\nTrain Dataset"); prop.table(table(trainSet_scaled$default))
+cat("\nTest Dataset");  prop.table(table(testSet_scaled$default))
+```
+
+\
+
+### KNN Model
+
+```{r}
+myCtrl <- trainControl(method = "cv", number = 10 )
+myGrid <- expand.grid(.k=c(1:10))
+set.seed(1)
+KNN_fit <- train(default ~. , 
+								 trainSet_scaled, method = "knn", trControl=myCtrl, tuneGrid = myGrid)
+KNN_fit
+```
+
+Running the knn model with our cleaned data gives a k value of 10, meaning that we will use 10 neighbors to determine the classification.\
+
+### Performance Metrics at Default Cutoff
+
+```{r}
+predicted_class <- predict(KNN_fit, testSet_scaled, type = "raw")    
+CM <- caret::confusionMatrix(predicted_class, testSet_scaled$default, positive = "1")  
+CM
+precision <- unname(CM$byClass['Pos Pred Value']) 
+recall    <- unname(CM$byClass['Sensitivity'])  
+knn_f1_score <- 2 * ((precision * recall) / (precision + recall))
+cat("F1 Score: ", knn_f1_score, "\n")
+```
+
+Using a default cutoff shows an unbalanced specificity and sensitivity. Using a threshold-tuned cutoff will allow us to have a more balanced model that will be more useful.\
+
+### Performance Metrics at Threshold-Tuned Cutoff
+
+```{r}
+predicted_prob <- as.data.frame(predict(KNN_fit, testSet_scaled, type = "prob"))
+roc_curve <- pROC::roc(as.numeric(testSet_scaled$default), predicted_prob[,2])
+optimal_cutoff <- coords(roc_curve, "best", ret = "threshold") #best uses Youden 
+cat("Optimal Cutoff"); optimal_cutoff
+
+predicted_class_opt <- ifelse(predicted_prob[,2] >= optimal_cutoff$threshold, 1, 0)
+
+cat("CONFUSION MATRIX AT OPTIMAL CUTOFF VALUE OF:", optimal_cutoff$threshold,"\n\n")
+CM_opt_KNN <- confusionMatrix(as.factor(predicted_class_opt), as.factor(testSet_scaled$default), positive = '1')
+CM_opt_KNN
+precision <- unname(CM_opt_KNN$byClass['Pos Pred Value']) # synonyms
+recall    <- unname(CM_opt_KNN$byClass['Sensitivity'])   # synonyms
+f1_score_KNN <- 2 * ((precision * recall) / (precision + recall))
+cat("F1 Score: ", f1_score_KNN, "\n")
+```
+
+Using the threshold-tuned cutoff, we are able to achieve a more balanced sensitivity and specificity of 40.71% and 79.72%. This is much better than the default cutoff. This allowed us to also improve our F1 score, which measures the balance of the precision and recall. While still being low and a poor performing model, it is improvement from the default cutoff.\
+
+### Gains Chart and ROC Curve with AUC
+
+```{r}
+testSet_scaled$default <- as.numeric(as.character(testSet_scaled$default))
+
+gains_table <- gains(testSet_scaled$default, predicted_prob[,2])
+
+gains_plot <- ggplot() +
+  geom_line(aes(x = c(0, gains_table$cume.obs), y = c(0, gains_table$cume.pct.of.total * sum(testSet_scaled$default))),
+            color = "blue") +
+  geom_line(aes(x = c(0, dim(testSet_scaled)[1]), y = c(0, sum(testSet_scaled$default))),
+            color = "red", linetype = "dashed") +
+  labs(x = "# of cases", y = "Cumulative", title = "Cumulative Gains Chart") +
+  theme_minimal()
+
+roc_object <- pROC::roc(testSet_scaled$default, predicted_prob[,2])
+
+auc_knn <- pROC::auc(roc_object)
+
+roc_plot <- ggroc(roc_object) +
+  geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1), linetype = "dashed", color = "red") +
+  labs(x = "1 - Specificity", y = "Sensitivity", title = "ROC Curve") +
+  annotate("text", x = 0.5, y = 0.05, label = paste("AUC =", round(auc_knn, 4)), size = 5, color = "blue") +
+  theme_minimal()
+
+grid.arrange(gains_plot, roc_plot, ncol = 2)
+```
+
+The cumulative gains chart performs okay. Our lift is higher than the reference line, but it is not a strong lift. The ROC curve also performs decent as it gives and area under the curve of 62.27%, which is better than random probability. These charts show us that our model is performing alright, but it could use some improvement.\
+  
+## LOGISTIC REGRESSION MODEL
+
+### Prepare Data
+```{r}
+lrdata <- mydata
+
+lrdata$income <- lapply(lrdata$income, function(x) replace(x, x == 0, 1.0001))
+
+lrdata$savings <- lapply(lrdata$savings, function(x) replace(x, x == 0, 1.0001))
+
+lrdata$debt <- lapply(lrdata$debt, function(x) replace(x, x == 0, 1.0001))
+```
+
+```{r}
+lrdata$logincome <- log(as.numeric(lrdata$income))
+lrdata$logsavings <- log(as.numeric(lrdata$savings))
+lrdata$logdebt <- log(as.numeric(lrdata$debt))
+lrdata <- lrdata[, !(names(lrdata) %in% c("income", "savings", "debt"))]
+dlookr::diagnose_outlier(lrdata)
+```
+
+The data preparation for the logistic regression model is more work than the KNN model. In order to reduce outliers and improve model effectiveness, we needed to take the log of some of the variables. Doing this reduced the outliers and will hopefully help in classifying the right clientele.\
+
+### Partition
+
+#### Partition 60/40 and check proportions
+
+```{r, include=FALSE}
+library(caret)
+set.seed(1)
+as.factor(lrdata$default)
+train_index <- createDataPartition(lrdata$default, p = 0.6, list = FALSE)
+
+lr_train_data <- lrdata[train_index, ]
+lr_test_data <- lrdata[-train_index, ]
+
+full_balance <- prop.table(table(lrdata$default))
+train_balance <- prop.table(table(lr_train_data$default))
+test_balance <- prop.table(table(lr_test_data$default))
+
+full_balance
+train_balance
+test_balance
+```
+
+### LR Model
+#### Model Summary
+```{r}
+library(car)
+library(caret)
+
+# Define the control for cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Initial logistic model fitting
+initial_logistic_model <- train(as.factor(default) ~ ., 
+                        data = lr_train_data, 
+                        method = "glm", 
+                        family = "binomial", 
+                        trControl = train_control)
+summary(initial_logistic_model)
+
+# Fit logistic regression to the data
+initial_logistic_fit <- glm(default ~ ., data = lr_train_data, family = "binomial")
+
+vif(initial_logistic_fit)
+```
+
+After initially running this model, credit_score stands out as expected to be a statistically significant predictor. Looking at the VIF, there are quite a fiew variables that are showing signs of multicollinearity. We can run this model again and remove some of the variables that are showing multicollinearity as well as credit_score to see what other variables might be significant behind the scenes.\
+
+```{r}
+logistic_model <- train(as.factor(default) ~ . - credit_score - r_groceries_income - logdebt - logsavings - cat_debt, 
+                        data = lr_train_data, 
+                        method = "glm", 
+                        family = "binomial", 
+                        trControl = train_control)
+summary(logistic_model)
+logistic_fit <- glm(default ~ . - logdebt - logsavings - cat_debt - r_groceries_income, data = lr_train_data, family = "binomial")
+```
+
+Removing any variables with a VIF over 3 as well as credit_score gave us interesting results. This introduced new variables as significant that weren't significant previously like the ratio of debt to income. This is good to know moving forward that these can have an impact outside of credit score. Moving into the odds ratio though, we cannot leave out credit_score, as it is the biggest predictor of default.
+
+### Coefficients as Odds Ratios
+```{r}
+exp(coef(logistic_fit))
+```
+
+**credit_score:** The odds ratio of `r exp(coef(logistic_fit)["credit_score"])` indicates that with every one unit increase in credit score, the odds of defaulting goes down by `r (1 - exp(coef(logistic_fit)["credit_score"])) * 100` percent. This makes sense as individuals with higher credit scores are generally less likely to default.\
+   
+**r_debt_income:**  The odds ratio of `r exp(coef(logistic_fit)["r_debt_income"])` indicates that with every one unit increase in the ratio of debt to income, the odds of defaulting goes down by `r (1 - exp(coef(logistic_fit)["r_debt_income"])) * 100` percent. This is an interesting observation, as it would seem that someone with more debt would be more likely to default.\
+  
+**r_savings_income:** The odds ratio of r_savings_income `r exp(coef(logistic_fit)["r_savings_income"])` means that for every one-unit increase in the savings-to-income ratio, the odds of defaulting increase by about `r -(1 - exp(coef(logistic_fit)["r_savings_income"])) * 100` percent. This suggests that higher savings relative to income could be associated with increased odds of default.\ 
+
+### Fit Metrics
+```{r}
+library(DescTools)
+library(formattable)
+McFadden <- formattable::comma(PseudoR2(logistic_fit, "McFadden"), digits = 4)
+Nagel <- formattable::comma(PseudoR2(logistic_fit, "Nagel"), digits = 4)
+McFadden; Nagel
+```
+
+The McFadden R2 suggests the model explains about `r 100 * formattable::comma(PseudoR2(logistic_fit, "McFadden"))` percent of the variance, while the Nagelkerke R2, a more adjusted measure, indicates the model explains roughly `r 100* formattable::comma(PseudoR2(logistic_fit, "Nagel"))` percent of the variation to the dependent variable. The Nagelkerke specifically indicates that we have a moderate performing model.\
+
+### Performance Metrics at Default Cutoff
+```{r}
+lr_pred_default <- predict(logistic_fit, lr_test_data, type = "response")
+
+lr_pred_class_default <- ifelse(lr_pred_default >= 0.5, 1, 0)
+
+lr_conf_matrix_default <- confusionMatrix(as.factor(lr_pred_class_default), as.factor(lr_test_data$default))
+print(lr_conf_matrix_default)
+
+lrdefaultprecision <- unname(lr_conf_matrix_default$byClass['Pos Pred Value'])
+lrdefaultrecall    <- unname(lr_conf_matrix_default$byClass['Sensitivity'])
+lrdefaultf1_score <- 2 * ((lrdefaultprecision * lrdefaultrecall) / (lrdefaultprecision + lrdefaultrecall))
+cat("F1 Score: ", lrdefaultf1_score, "\n")
+```
+
+The logistic regression model achieves a pretty good accuracy and demonstrates high sensitivity, meaning it effectively identifies non-defaulters. However, its low specificity indicates it struggles to correctly classify defaulters, leading to a high rate of false negatives. This imbalance is reflected in a moderate Kappa statistic, highlighting limited agreement beyond chance. To improve performance, threshold tuning can be applied to achieve a better balance between sensitivity and specificity, addressing the trade-offs in misclassification.\ 
+
+### Performance Metrics at Threshold-Tuned Cutoff
+
+```{r}
+lr_predicted_prob <- predict(logistic_fit, lr_test_data, type = "response")
+
+lr_roc_curve <- pROC::roc(as.numeric(lr_test_data$default), lr_predicted_prob)
+
+lr_optimal_cutoff <- coords(lr_roc_curve, "best", ret = "threshold")
+
+optimal_threshold <- as.numeric(lr_optimal_cutoff)  # Convert to numeric
+cat("Optimal Cutoff: ", optimal_threshold, "\n")
+
+predicted_class_opt <- ifelse(lr_predicted_prob >= optimal_threshold, 1, 0)
+
+cat("CONFUSION MATRIX AT OPTIMAL CUTOFF VALUE OF:", optimal_threshold, "\n\n")
+CM_opt_LR <- confusionMatrix(as.factor(predicted_class_opt), as.factor(lr_test_data$default), positive = '1')
+CM_opt_LR
+
+precision_opt <- unname(CM_opt_LR$byClass['Pos Pred Value'])
+recall_opt    <- unname(CM_opt_LR$byClass['Sensitivity'])
+f1_score_opt <- 2 * ((precision_opt * recall_opt) / (precision_opt + recall_opt))
+cat("F1 Score (Optimal): ", f1_score_opt, "\n")
+```
+
+The threshold value of `r optimal_threshold` allows us to achieve a more balanced model. This make our sensitivity and specificity more balanced. Our optimal F1 score is `r f1_score_opt` which is better than the KNN model.\
+
+### Gains Chart and ROC Curve with AUC
+
+```{r}
+# Convert 'default' column to numeric
+lr_test_data$default <- as.numeric(as.character(lr_test_data$default))
+
+# Predict probabilities
+lr_predicted_prob <- predict(logistic_fit, lr_test_data, type = "response")
+
+# Generate gains table
+gains_table <- gains(lr_test_data$default, lr_predicted_prob)
+
+# Create cumulative gains plot
+gains_plot <- ggplot() +
+  geom_line(aes(x = c(0, gains_table$cume.obs), y = c(0, gains_table$cume.pct.of.total * sum(lr_test_data$default))),
+            color = "blue") +
+  geom_line(aes(x = c(0, dim(lr_test_data)[1]), y = c(0, sum(lr_test_data$default))),
+            color = "red", linetype = "dashed") +
+  labs(x = "# of cases", y = "Cumulative", title = "Cumulative Gains Chart") +
+  theme_minimal()
+
+# Compute ROC curve
+roc_object <- pROC::roc(lr_test_data$default, lr_predicted_prob)
+
+# Calculate AUC
+auc_LR <- pROC::auc(roc_object)
+
+# Create ROC plot
+roc_plot <- ggroc(roc_object) +
+  geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1), linetype = "dashed", color = "red") +
+  labs(x = "1 - Specificity", y = "Sensitivity", title = "ROC Curve") +
+  annotate("text", x = 0.5, y = 0.05, label = paste("AUC =", round(auc_LR, 4)), size = 5, color = "blue") +
+  theme_minimal()
+
+# Arrange the plots
+grid.arrange(gains_plot, roc_plot, ncol = 2)
+
+```
+
+The gains chart and ROC curve chart are similar to the KNN model. Now our model predicts the employee performance `r 100 * auc(roc_object)` percent of the time.\
+
+## COMPARISON ACROSS MODELS
+
+```{r}
+library(DALEX)
+
+mydata_scaled <- mydata %>%
+  dplyr::select(default,where(is.numeric)) %>%  
+  dplyr::mutate(across(where(is.numeric), scale))
+
+set.seed(1)
+myIndex<- createDataPartition(mydata_scaled$default, p=0.6, list=FALSE)
+trainSet_scaled <- mydata_scaled[myIndex,]
+testSet_scaled  <- mydata_scaled[-myIndex,]
+
+myCtrl <- trainControl(method = "cv", number = 10 )
+myGrid <- expand.grid(.k=c(1:10))
+set.seed(1)
+KNN_fit <- train(default ~. , 
+								 trainSet_scaled, method = "knn", trControl=myCtrl, tuneGrid = myGrid)
+
+testSet_scaled$default_numeric <- as.numeric(as.character(testSet_scaled$default))
+lr_test_data$default_numeric <- as.numeric(as.character(lr_test_data$default))
+
+explainer_knn <- DALEX::explain(
+  KNN_fit,
+  data = testSet_scaled[,-1], 
+  y = testSet_scaled$default_numeric, 
+  label = "MODEL 1: KNN"
+)
+
+explainer_glm <- DALEX::explain(
+  logistic_fit,
+  data = lr_test_data[,-1], 
+  y = lr_test_data$default_numeric, 
+  label = "MODEL 2: LOGISTIC"
+)
+```
+
+### Variable Importance
+
+```{r}
+p1 <- explainer_knn %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+p2 <- explainer_glm %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+library(gridExtra)
+grid.arrange(p1, p2, nrow=2)
+```
+
+Both of our models show credit_score as the most important variable. After that, the rankings change significantly. KNN shows the categorical mortgage and the ratio of savings to income as the next top variables. The logistic model shows a cluster of the ratio measures as the next important variables.\
+
+
+### Residuals
+
+```{r}
+p1 <- explainer_knn %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE)
+p2 <- explainer_glm %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE)
+
+grid.arrange(p1, p2, nrow=2)
+```
+
+
+The residuals for both the KNN and logistic regression models are generally clustered around 0, indicating reasonable predictive performance, though some variability is present, particularly in the KNN model. Logistic regression appears to show slightly less dispersion in residuals, suggesting it may provide more consistent predictions.\
+
+### Performance Metrics
+
+#### Table of Threshold-Tuned Metrics
+
+```{r}
+# Grouping the Confusion Matrix metrics together for each model for comparison
+KNN_metrics <- c(
+  Accuracy = unname(CM_opt_KNN$overall['Accuracy']), 
+  Sensitivity = unname(CM_opt_KNN$byClass['Sensitivity']), 
+  Specificity = unname(CM_opt_KNN$byClass['Specificity']),
+  F1_Score = f1_score_KNN, 
+  AUC = auc_knn
+)
+
+LR_metrics <- c(
+  Accuracy = unname(CM_opt_LR$overall['Accuracy']),  # Ensure this variable name matches your object
+  Sensitivity = unname(CM_opt_LR$byClass['Sensitivity']), 
+  Specificity = unname(CM_opt_LR$byClass['Specificity']),
+  F1_Score = f1_score_opt,  # Ensure this variable name matches your object
+  AUC = auc_LR  # Ensure this variable name matches your object
+)
+
+
+model_metrics <- data.frame(
+  Model = c("KNN", "Logistic Regression"),
+  Accuracy = c(KNN_metrics['Accuracy'], LR_metrics['Accuracy']),
+  Sensitivity = c(KNN_metrics['Sensitivity'], LR_metrics['Sensitivity']),
+  Specificity = c(KNN_metrics['Specificity'], LR_metrics['Specificity']),
+  AUC = c(KNN_metrics['AUC'], LR_metrics['AUC']),
+  F1_Score = c(KNN_metrics['F1_Score'], LR_metrics['F1_Score'])
+)
+
+
+print(model_metrics)
+```
+
+When selecting the right model, we first need to clarify whether we should prioritize preventing false negatives or false positives. In our case, we should try and prevent false negatives, as we do not want to assume someone will not default and they end up doing the opposite. Preventing false negatives means that we need to choose the model that has the higher sensitivity, which in our case, is the logistic regression model. This is a good choice as it has more balance than the KNN and a higher area under the curve.\
+
+#### Chart of Threshold-Tuned Metrics
+
+```{r}
+# use what you created above, but display visually
+
+model_metrics_long <- model_metrics %>%
+  pivot_longer(cols = Accuracy:F1_Score, names_to = "Metric", values_to = "Value") %>%
+  mutate(
+    Model = factor(Model, levels = c("KNN", "Logistic Regression")),
+    Metric = factor(Metric, levels = c("Accuracy", "Sensitivity", "Specificity", "F1_Score", "AUC"))  )
+
+ggplot(model_metrics_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Metric, scales = "fixed") +  
+  theme_minimal() +
+  labs(title = " ", x = " ", y = " ") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +  # Rotate x-axis labels
+  scale_fill_manual(values = c("darkgreen", "darkblue"))
+```
+
+Both models have their strengths, but logistic has higher results in the areas that we need.\
+
+### Identify your Best, Final Model
+
+After evaluating both the KNN and Logistic Regression models, the Logistic Regression model stands out as the best option for predicting credit defaults. The model provides clear performance metrics that demonstrate its ability to accurately distinguish between customers who are likely to default and those who are not. Key performance indicators, such as McFadden R² and Nagelkerke R², show that the model explains a decent amount of the variance in default behavior. The model's sensitivity and specificity at the optimal cutoff indicate a more balanced prediction capability, minimizing false negatives while correctly identifying high-risk customers. The optimal F1 score strengthens the reliability of the model. The logistic regression model also offers ease in interpreting the key predictors of credit default. Based on these metrics, the logistic regression model will provide meaningful insights into customer behavior and significantly help reduce financial risk.\
+
+# DEPLOYMENT
+
+## Summarize Findings
+
+
+The Logistic Regression model reveals several critical factors that influence the likelihood of credit default among customers. Key predictors include credit score, the ratio of debt to income, and the ratio of savings to income. The odds ratios show that with each increase in credit score, the odds of default decrease, which aligns with the expectation that individuals with higher credit scores are less likely to default. Interestingly, the odds of default decrease with a higher debt-to-income ratio, which may suggest better financial management despite higher debt. Conversely, the odds of default increase with a higher savings-to-income ratio, possibly indicating that individuals prioritize saving over debt repayment. By focusing on these key behaviors, the institution can reduce defaults while ensuring responsible lending practices.
+
+
+## Business Recommendations and Suggested client actions
+
+Based on the findings from the Logistic Regression model, several strategic recommendations can be made to improve the institution's ability to predict and mitigate credit defaults. First, the institution should focus on enhancing its credit scoring models and ensure that applicants with lower credit scores are more thoroughly scored, as these customers are at a higher risk of default. There are many variables that can be explored and it would be good to do a deep-dive on each variable and their implications. This could uncover even more useful predictors for whether a customer will default or not. By implementing these recommendations, the institution can improve its risk management and reduce financial losses while fostering responsible lending practices.\
+
+# REFERENCES
+
+## R and Packages
+
+```{r}
+cat(as.character(R.version.string),"\n")
+
+cat("\nR Packages Used:\n")
+names(sessionInfo()$otherPkgs)
+```
+
+## Other References
+
+Jaggia, S., Kelly, A., Lertwachara, K., & Chen, L. (2023). *Business analytics: Communicating with numbers* (2nd Ed.). McGraw-Hill.

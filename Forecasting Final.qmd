@@ -1,0 +1,340 @@
+---
+title: "Forecasting Report"
+author: "LUKE STUCKY"
+date: "December 11, 2024"
+format:
+  html: 
+    code-fold: false
+    code-overflow: wrap
+execute:
+  warning: false
+  messages: false
+  echo: false
+  include: true
+toc: true
+editor: source
+---
+
+```{r}
+options(scipen=999)
+suppressWarnings(RNGversion("3.5.3"))
+
+library(tidyverse)
+library(DataExplorer)
+library(flextable)
+library(gridExtra)
+library(caret)
+library(gains)
+library(pROC)
+library(klaR)
+library(rpart)
+library(rpart.plot)
+library(dplyr)
+library(ggplot2)
+library(janitor)
+library(smooth)
+library(forecast)
+library(Metrics)
+library(knitr)
+library(dlookr)
+```
+
+
+# BUSINESS UNDERSTANDING
+
+As the President’s economic advisor, Luke Stucky's responsibility is to analyze historical unemployment rate data to provide actionable insights into labor market trends. These insights will enable the President to anticipate economic challenges and develop informed strategies for policy decisions.\
+
+To complete this project, Luke set out to answer the following two questions to aid in correctly informing the President:\
+
+What patterns and trends can be identified in historical unemployment rate data to understand labor market dynamics?\
+How might these historical insights guide proactive planning and decision-making during the President's term?\
+
+By focusing on historical data analysis, Luke aims to equip the President with a comprehensive understanding of past labor market conditions, enabling data-driven strategies to address current and future economic challenges while supporting workforce stability.\
+
+# DATA UNDERSTANDING
+
+```{r}
+mydata <- read.csv("UNRATENSA.csv")
+mydata <- clean_names(mydata)
+
+tsdata <- ts(mydata$unratensa, start = c(1948,1), end = c(2024,1), frequency=12)
+plot(tsdata)
+```
+
+The time-series plot of unemployment rates shows a cyclical behavior. Theses cycles are linked to recessions and recoveries. When a recession hits, the unemployment rate is at its highest, but it begins to decline then until the next recession.\
+
+### EDA
+
+```{r}
+mydata$date <- as.Date(mydata$date)
+head(mydata,3)
+tail(mydata,3)
+plot_intro(mydata)
+```
+
+### Outliers
+
+```{r}
+dlookr::diagnose_outlier(mydata)
+```
+
+There are outliers in our data, but that is to be expected in unemployment rate data. We will leave the outliers in as we do not want to change anything about this data.\
+
+# Data Preparation
+
+## Partitioning
+
+```{R}
+TData <- window(tsdata, end = c(1998))
+VData <- window(tsdata, start = c(1998))
+```
+
+# Modeling
+
+## Regression with Trend and Seasonality
+
+```{r}
+# Example: Trend and Seasonal Regression Model
+trend <- 1:length(tsdata)
+seasonal <- factor(cycle(tsdata))
+reg_data <- data.frame(Unemployment = tsdata, Trend = trend, Seasonal = seasonal)
+
+# Fit regression model
+reg_model <- lm(Unemployment ~ Trend + Seasonal, data = reg_data)
+summary(reg_model)
+```
+
+Running a regression with seasonality and trend showed us that the trend and lots of seasons are statistically significant. However, the model is not able to explain very much variation.\
+
+### Prediction
+
+```{r}
+# Generate predictions for training and validation sets
+reg_data$preds <- predict(reg_model, newdata = reg_data)
+
+# Split the predictions into training and validation sets
+train_preds <- reg_data$preds[1:length(TData)]
+valid_preds <- reg_data$preds[(length(TData)+1):nrow(reg_data)]
+
+# Calculate performance metrics for training set
+train_rmse <- rmse(TData, train_preds)
+train_mape <- mape(TData, train_preds) * 100
+
+# Calculate performance metrics for validation set
+valid_rmse <- rmse(VData, valid_preds)
+valid_mape <- mape(VData, valid_preds) * 100
+
+cat("Training RMSE:", round(train_rmse, 2), "\n")
+cat("Training MAPE:", round(train_mape, 2), "%\n")
+cat("Validation RMSE:", round(valid_rmse, 2), "\n")
+cat("Validation MAPE:", round(valid_mape, 2), "%\n")
+```
+
+Displaying the MAPE and RMSE for both the training and the validation set shows that the validation set performs a lot worse than the training set. This is likely due to the two big recessions that hit in the validation set. Our MAPE for the training set is `r round(train_mape, 2)` percent but for the validation it is `r round(valid_mape, 2)` percent. This is the same for the RMSE.\
+
+```{r}
+# Plot actual vs. predicted values for the validation set
+data <- data.frame(
+  Time = time(tsdata),
+  Actuals = tsdata,
+  Predicted = c(train_preds, valid_preds)
+)
+
+ggplot(data, aes(x = Time)) +
+  geom_line(aes(y = Actuals, color = "Actuals"), size = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("black", "blue"),
+                     labels = c("Actuals", "Predicted")) +
+  labs(title = "Actual vs. Predicted Unemployment Rates",
+       x = "Time",
+       y = "Unemployment Rate")
+```
+
+Plotting the predicted values shows that there is an upward trend in the unemployment rate. It is very slow but it is present.\
+
+## Simple Moving Average
+
+```{r, include=FALSE}
+sma3 <- sma(tsdata, order=3, centre=FALSE)
+sma3$fitted
+```
+
+### Calculate the RMSE and MAPE to assess fit  
+
+```{r}
+# Create Simple Moving Average Model
+sma3 <- sma(TData, order=3, centre=FALSE)
+
+# Evaluate Simple Moving Average Model on training data
+train_actuals_sma <- TData[4:length(TData)]  # Skip first 3 observations
+train_fitted_sma  <- sma3$fitted[4:length(TData)]  # Skip first 3 observations
+
+# Metrics for SMA (Training)
+train_rmse_sma <- rmse(train_actuals_sma, train_fitted_sma)
+train_mape_sma <- mape(train_actuals_sma, train_fitted_sma) * 100
+
+# Forecast on the validation set
+forecast_sma <- forecast(sma3, h = length(VData))
+
+# Ensure the forecast length matches the validation data length
+valid_actuals_sma <- VData
+valid_fitted_sma <- forecast_sma$mean
+
+# Metrics for SMA (Validation)
+valid_rmse_sma <- rmse(valid_actuals_sma, valid_fitted_sma)
+valid_mape_sma <- mape(valid_actuals_sma, valid_fitted_sma) * 100
+
+cat("Training RMSE:", round(train_rmse_sma, 2), "\n")
+cat("Training MAPE:", round(train_mape_sma, 2), "%\n")
+cat("Validation RMSE:", round(valid_rmse_sma, 2), "\n")
+cat("Validation MAPE:", round(valid_mape_sma, 2), "%\n")
+```
+
+The validation RMSE performs worse in the simple moving average than in the regression, but the validation MAPE outperforms in this model by a landslide.\
+
+### Actual vs Predicted
+```{r}
+# Create Simple Moving Average Model
+sma3 <- sma(TData, order=3, centre=FALSE)
+
+# Evaluate Simple Moving Average Model on training data
+train_actuals_sma <- TData[4:length(TData)]  # Skip first 3 observations
+train_fitted_sma  <- sma3$fitted[4:length(TData)]  # Skip first 3 observations
+
+# Metrics for SMA (Training)
+train_rmse_sma <- rmse(train_actuals_sma, train_fitted_sma)
+train_mape_sma <- mape(train_actuals_sma, train_fitted_sma) * 100
+
+# Forecast on the validation set
+forecast_sma <- forecast(sma3, h = length(VData))
+
+# Ensure the forecast length matches the validation data length
+valid_actuals_sma <- VData
+valid_fitted_sma <- forecast_sma$mean
+
+# Combine training and validation predictions
+sma_preds <- c(train_fitted_sma, valid_fitted_sma)
+
+# Adjusting to match lengths properly
+actuals_combined <- c(train_actuals_sma, valid_actuals_sma)
+time_combined <- time(tsdata)[4:(3 + length(actuals_combined))]
+
+sma_data <- data.frame(
+  Time = time_combined,
+  Actuals = actuals_combined,
+  Predicted = sma_preds
+)
+
+# Plot actual vs. predicted values for Simple Moving Average
+ggplot(sma_data, aes(x = Time)) +
+  geom_line(aes(y = Actuals, color = "Actuals"), size = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("black", "blue"),
+                     labels = c("Actuals", "Predicted")) +
+  labs(title = "Actual vs. Predicted Unemployment Rates (Simple Moving Average)",
+       x = "Time",
+       y = "Unemployment Rate")
+
+```
+
+The plot of the predicted rate shows that it would remain constant a little under a 5% unemployment rate. Again, the 2008 recession and covid hit during the prediction, so that hurt the metrics significantly.\
+
+## Holt-Winters Smoothing Model
+
+### Estimate the model using the computer
+
+```{r}
+HCmp <- ets(TData, model = "AAN")
+```
+
+### Validate
+```{r}
+# Evaluate Holt-Winters Model
+nV <- length(VData)
+fCmp <- forecast::forecast(HCmp, h = nV)
+
+# Metrics for Holt-Winters (Training and Validation)
+train_rmse_hw <- Metrics::rmse(TData, HCmp$fitted)
+train_mape_hw <- Metrics::mape(TData, HCmp$fitted) * 100
+valid_rmse_hw <- Metrics::rmse(VData, fCmp$mean)
+valid_mape_hw <- Metrics::mape(VData, fCmp$mean) * 100
+
+cat("Training RMSE:", round(train_rmse_hw, 2), "\n")
+cat("Training MAPE:", round(train_mape_hw, 2), "%\n")
+cat("Validation RMSE:", round(valid_rmse_hw, 2), "\n")
+cat("Validation MAPE:", round(valid_mape_hw, 2), "%\n")
+```
+
+The Holt-Winters Smoothing method performs much better in the training set, but in the validation set, our MAPE is higher than in the simple moving average. Given this, it will be a close call for which model is used.\
+
+```{r}
+# Plot actual vs. predicted values for Holt-Winters
+hw_preds <- c(HCmp$fitted, fCmp$mean)
+hw_data <- data.frame(
+  Time = time(tsdata)[1:length(hw_preds)],
+  Actuals = tsdata[1:length(hw_preds)],
+  Predicted = hw_preds
+)
+
+# Check and adjust lengths if needed
+if (length(hw_data$Predicted) > length(hw_data$Actuals)) {
+  hw_data <- hw_data[1:length(hw_data$Actuals), ]
+} else {
+  hw_data$Predicted <- c(hw_data$Predicted, rep(NA, length(hw_data$Actuals) - length(hw_data$Predicted)))
+}
+
+ggplot(hw_data, aes(x = Time)) +
+  geom_line(aes(y = Actuals, color = "Actuals"), size = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("black", "blue"),
+                     labels = c("Actuals", "Predicted")) +
+  labs(title = "Actual vs. Predicted Unemployment Rates (Holt-Winters)",
+       x = "Time",
+       y = "Unemployment Rate")
+```
+
+From the plot, it is clear that the training plot is much more accurate in this Holt-Winters model than in the simple moving average. In this, model, the predicted unemployment rate remains constant at a little over 5%.\
+
+# Evaluation
+
+```{r}
+# Combine Metrics
+metrics <- data.frame(
+  Model = rep(c("Simple Moving Average", "Holt-Winters", "Regression with Trend and Seasonality"), each = 2),
+  Set = rep(c("Training", "Validation"), times = 3),
+  RMSE = c(train_rmse_sma, valid_rmse_sma, train_rmse_hw, valid_rmse_hw, train_rmse, valid_rmse),
+  MAPE = c(train_mape_sma, valid_mape_sma, train_mape_hw, valid_mape_hw, train_mape, valid_mape)
+)
+
+kable(metrics, caption = "Comparison of Model Metrics for Training and Validation Sets")
+```
+
+Considering the RMSE and the MAPE for both the training and validation data, the best model would be the Holt-Winters. This is due to it having the lowest RMSE in both and a competitively low MAPE.\
+
+# Deployment
+After evaluating each model, we determined that the Holt-Winters model provides the most accurate predictions, demonstrated by its lowest RMSE of `r round(valid_rmse, 2)` and competitive MAPE of `r round(valid_mape, 2)` on the validation set of data.\
+\
+Returning to the questions from the beginning, the Holt-Winters model can effectively address each question:\
+\
+What patterns and trends can be identified in historical unemployment rate data to understand labor market dynamics?\ 
+The Holt-Winters model shows that unemployment rates rise and fall in cycles, which match times of economic trouble and recovery. It catches seasonal changes and long-term trends well. During recessions, unemployment rates rise, and during recoveries, they fall.\
+\
+How might these historical insights guide proactive planning and decision-making during the President's term?\ 
+By identifying patterns in unemployment rates, the President can better anticipate economic instability and implement timely policies. While the Holt-Winters model can't predict exact timing of recessions and recoveries, it provides a good reference for expected trends and seasonal fluctuations. This helps the President prepare for potential unemployment spikes and supports workforce stability during recoveries. Despite its limitations, the model's insights guide proactive steps to manage the labor market effectively.\
+\
+the Holt-Winters model, with its lowest RMSE of `r round(valid_rmse, 2)` and competitive MAPE of `r round(valid_mape, 2)`, offers the most accurate predictions among the evaluated models. Although it cannot predict the exact timing of recessions and recoveries, it serves as a reliable reference for expected trends and seasonal fluctuations, aiding in proactive planning and effective decision-making to manage labor market dynamics.\
+
+# REFERENCES
+
+## R and Packages
+
+```{r}
+cat(as.character(R.version.string),"\n")
+
+cat("\nR Packages Used:\n")
+names(sessionInfo()$otherPkgs)
+```
+
+## Other References
+
+Jaggia, S., Kelly, A., Lertwachara, K., & Chen, L. (2023). *Business analytics: Communicating with numbers* (2nd Ed.). McGraw-Hill.
