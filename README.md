@@ -1,3 +1,3 @@
-# fall2024
-This showcases my final three projects in my undergrad.
+# Fall 2024 - Business Decision Modeling and Predictive Analysis
+## Project Overview
 This project applies predictive analytics techniques to real-world business datasets using classification, prediction, and time-series forecasting models. Following the CRISP-DM framework, it analyzes data to generate actionable insights. The project includes three analytical reports and a final presentation. The Classification Report applies logistic regression and an alternative classification method to a dataset with a binary target variable. The Prediction Report uses linear regression and regression tree models to forecast a continuous target variable. The Forecasting Report employs time-series analysis, incorporating regression with trend and seasonal components, alongside a holt-winters smoothing model. The project concludes with a Final Presentation summarizing findings from the classification and prediction models.
